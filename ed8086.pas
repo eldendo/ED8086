@@ -14,7 +14,8 @@
 program ed8086;
 uses sysutils;
 
-var dbug: boolean = true;
+const showSub = 100;
+//var dbug: boolean = true;
 
 type 	nibble = 0..15;
 		octed = 0..7;
@@ -41,6 +42,7 @@ var mem: array[0..memSize-1] of byte;
 	d: 0..1;
 	oper1,oper2: location;
 	w: boolean; // is true when word / memory
+	calldept: cardinal = 0;
   
 	
 // ---------------- general help methods ----------------
@@ -73,7 +75,7 @@ end;
 
 procedure debug(s: string);
 begin
-	if dbug then writeln(s)
+	if CallDept < showSub then writeln(s)
 end;
 
 procedure load;
@@ -92,7 +94,7 @@ end;
 
 procedure mon;
 begin
-	if not dbug then exit;
+	if not (CallDept < showSub) then exit;
 	writeln;
 	writeln('------------- mon -------------');
 	writeln('IP=',hexstr(IP,4));
@@ -207,6 +209,11 @@ begin
 	if m then pokeX(a,b) else setRegX(a,b)
 end;
 
+procedure writeLoc(l: location);
+begin
+	with l do writeRMX(memory,aORi,content)
+end;
+
 // -------------- memory mode methods ------------------
 
 procedure modRM;
@@ -259,6 +266,7 @@ begin
 					oper.content := peekX(oper.aORi);
 			   end;
 			6: begin //direct addressing
+				// what in EI mode ? what is fetched first ??? < imm last. corrected in mm_EI
 					oper.aORi := fetch2;
 					oper.content := peekX(oper.aORi);
 					debug('----------direct addressing');
@@ -273,10 +281,26 @@ begin
 				error('mode=0, rm value not yet implemented')
 			end
 		end;
+//  1: + 8 bit signed displacement		
+	2:	begin
+			oper.memory := true;
+			case rm of
+			5:	begin
+					oper.aORi := RX[DI]+fetch2; //16 unsigned displacement
+					oper.content := peekX(oper.aORi)
+				end;
+			7:  begin
+					oper.aORi := RX[BX]+fetch2; //16 unsigned displacement
+					oper.content := peekX(oper.aORi)
+				end
+			else
+				error('mode=2, rm value not yet implemented')
+			end
+		end;
 	3: 	begin
 			oper.memory := false;
 			oper.aORi := rm;
-			oper.content := getReg2(rm);
+			oper.content := getRegX(rm);
 			debug('------register '+hexStr(rm,1)+' read');
 		end;
 	else
@@ -298,8 +322,8 @@ end;
 procedure mm_EI;
 begin
 	modRM;
+	oper1 := mm_E;
 	oper2 := mm_I;
-	oper1 := mm_E
 end;
 
 procedure mm_EG;
@@ -307,6 +331,16 @@ begin
 	modRM;
 	if d=0  then begin oper1 := mm_E; oper2 := mm_G end
 			else begin oper1 := mm_G; oper2 := mm_E end;
+end;
+
+procedure mm_AI;
+begin
+	oper1.memory := false;
+	oper1.aORi := 0;
+	oper1.content := getRegX(0);
+	debug('----------address='+hexstr(oper1.aORi,4));
+	debug('----------value='+hexStr(oper1.content,4));
+	oper2 := mm_I
 end;
 
 procedure writeback;
@@ -347,6 +381,7 @@ begin
 		4:if FZ=1 then IP := IP + int8(b); //JZ
 		5:if FZ=0 then IP := IP + int8(b); //JNZ
 		6:if (FC=1) or (FZ=1) then IP := IP + int8(b); //JBE
+		7:if (FC=0) and (FZ=0) then IP := IP + int8(b); // JA, JNBE
 		9:if FS=0 then IP := IP + int8(b); //JNS
 		else error('JCond not implemented for condition '+hexstr(cc,1))
 	end 
@@ -358,6 +393,7 @@ begin
 	writeln;writeln('*** program terminated by HLT instruction ***');
 	writeln('--- In the ''codegolf'' program this probably means');
 	writeln('--- there is some logical error in the emulator');
+	writeln('--- or the program reached the end without error');
 	writeln('bye');
 	display;
 	halt
@@ -372,6 +408,27 @@ begin
 	debug('------'+hexStr(oper1.aORi,4)+' '+hexStr(oper1.content,4));
 	writeBack
 //	writeRMX(oper1.memory,oper1.aORi,oper1.content) // both solutions work
+end;
+
+procedure i_XCHG;
+var t: word; 
+begin
+		debug('--executing XCHG EG');
+		t := oper1.content;
+		oper1.content := oper2.content;
+		oper2.content := t;
+		writeLoc(oper1);
+		writeLoc(oper2)
+end;
+
+procedure i_XCHG_RX_AX;
+var T: word;
+begin
+	debug('--executing XCHG RX AX');
+	T := RX[AX];
+	RX[AX] := RX[IR and %111];
+	RX[IR and %111] := T
+
 end;
 
 procedure i_MOV_RX_Iw;
@@ -391,27 +448,7 @@ begin
 			else RX[r-4] := b*256+lo(RX[r-4]) 
 end;
 
-procedure i_INC_RX;
-var r: 0..7;
-begin
-	debug('--executing INC RX');
-	r := IR and %111;
-	inc(RX[r]);
-	FZ:=ord(RX[r]=0);
-	FS:=ord(RX[r]>=$8000)
-	// FC unchanged
-end;
 
-procedure i_DEC_RX;
-var r: 0..7;
-begin
-	debug('--executing DEC RX');
-	r := IR and %111;
-	dec(RX[r]);
-	FZ:=ord(RX[r]=0);
-	FS:=ord(RX[r]>=$8000)
-	// FC unchanged
-end;
 
 procedure i_PUSH_RX;
 begin
@@ -443,7 +480,7 @@ begin
 	dec(RX[SP],2); //SP:=SP-2	
 	poke2(RX[SP],IP);
 	IP:=IP+int16(w);
-//	dbug:=false
+	inc(calldept)
 end;
 
 procedure i_RET;
@@ -451,19 +488,10 @@ begin
 	debug('--executing RET');
 	IP := peek2(RX[SP]);
 	inc(RX[SP],2); //SP:=SP+2
-//	dbug:=true
+	dec(calldept)
 end;
 
-procedure i_CMP;
-begin
-	debug('--executing CMP');
-	if w=false then error('CMP is nyi for byte operations');	
-	FC:=ord(oper1.content<oper2.content);
-	oper1.content:=oper1.content-oper2.content;
-	debug('------'+hexStr(oper1.content,4)+' '+hexStr(oper2.content,4));
-	FZ:=ord(oper1.content=0);
-	FS:=ord(oper1.content>=$8000)
-end;
+
 
 procedure i_XOR;
 begin
@@ -481,12 +509,14 @@ end;
 procedure i_OR;
 begin
 	debug('--executing OR');
-	if w=false then error('OR is nyi for byte operations');
+//	if w=false then error('OR is nyi for byte operations');
 	debug('------'+hexStr(oper1.content,4)+' '+hexStr(oper2.content,4));	
 	oper1.content:=oper1.content or oper2.content;
 	debug('------'+hexStr(oper1.content,4)+' '+hexStr(oper2.content,4));
-	FZ:=ord(oper1.content=0);
-	FS:=ord(oper1.content>=$8000);
+	if w then FZ:=ord(oper1.content=0)
+		 else FZ:=ord(lo(oper1.content)=0);
+	if w then FS:=ord(oper1.content>=$8000)
+		 else FS:=ord(oper1.content>=$80);
 	FC:=0;
 	writeback
 end;
@@ -494,12 +524,14 @@ end;
 procedure i_AND;
 begin
 	debug('--executing AND');
-	if w=false then error('AND is nyi for byte operations');
+//	if w=false then error('AND is nyi for byte operations');
 	debug('------'+hexStr(oper1.content,4)+' '+hexStr(oper2.content,4));	
 	oper1.content:=oper1.content and oper2.content;
 	debug('------'+hexStr(oper1.content,4)+' '+hexStr(oper2.content,4));
-	FZ:=ord(oper1.content=0);
-	FS:=ord(oper1.content>=$8000);
+	if w then FZ:=ord(oper1.content=0)
+		 else FZ:=ord(lo(oper1.content)=0);
+	if w then FS:=ord(oper1.content>=$8000)
+		 else FS:=ord(oper1.content>=$80);
 	FC:=0;
 	writeback
 end;
@@ -508,14 +540,17 @@ procedure i_ADD;
 var T: Dword;
 begin
 	debug('--executing ADD');
-	if w=false then error('ADD is nyi for byte operations');
+//	if w=false then error('ADD is nyi for byte operations');
 	debug('------'+hexStr(oper1.content,4)+' '+hexStr(oper2.content,4));
 	T := oper1.content + oper2.content;
-	FC := ord(T>$FFFF);
+	if w then FC := ord(T>$FFFF)
+		 else FC := ord(T>$FF);
 	oper1.content := T;
 	debug('------'+hexStr(oper1.content,4)+' '+hexStr(oper2.content,4));
-	FZ:=ord(oper1.content=0);
-	FS:=ord(oper1.content>=$8000);
+	if w then FZ:=ord(oper1.content=0)
+		 else FZ:=ord(lo(oper1.content)=0);
+	if w then FS:=ord(oper1.content>=$8000)
+		 else FS:=ord(oper1.content>=$80);
 	writeback
 end;
 
@@ -564,6 +599,75 @@ begin
 	writeback
 end;
 
+procedure i_CMP;
+var T: Dword;
+begin
+	debug('--executing CMP');
+//	if w=false then error('CMP is nyi for byte operations - carry not OK');	
+//	FC:=ord(oper1.content<oper2.content);
+	T:=oper1.content-oper2.content;
+	if w then FC := ord(T>$FFFF)
+		 else FC := ord(T>$FF);
+	oper1.content:=T;
+	debug('------'+hexStr(oper1.content,4)+' '+hexStr(oper2.content,4));
+	// the difference is written in the debug statement but is not written back !
+	if w then FZ:=ord(oper1.content=0)
+		 else FZ:=ord(lo(oper1.content)=0);
+	if w then FS:=ord(oper1.content>=$8000)
+		 else FS:=ord(oper1.content>=$80);
+end;
+
+procedure i_INC;
+begin
+	debug('--executing INC');
+//	if w=false then error('INC is nyi for byte operations');
+	debug('------'+hexStr(oper1.content,4)+' '+hexStr(oper2.content,4));
+	inc(oper1.content);
+	debug('------'+hexStr(oper1.content,4)+' '+hexStr(oper2.content,4));
+	if w then FZ:=ord(oper1.content=0)
+		 else FZ:=ord(lo(oper1.content)=0);
+	if w then FS:=ord(oper1.content>=$8000)
+		 else FS:=ord(oper1.content>=$80);
+	// FC unchanged
+	writeback
+end;
+
+procedure i_DEC;
+begin
+	debug('--executing DEC');
+//	if w=false then error('DEC is nyi for byte operations');
+	debug('------'+hexStr(oper1.content,4)+' '+hexStr(oper2.content,4));
+	dec(oper1.content);
+	debug('------'+hexStr(oper1.content,4)+' '+hexStr(oper2.content,4));
+	if w then FZ:=ord(oper1.content=0)
+		 else FZ:=ord(lo(oper1.content)=0);
+	if w then FS:=ord(oper1.content>=$8000)
+		 else FS:=ord(oper1.content>=$80);
+	// FC unchanged
+	writeback
+end;
+
+procedure i_INC_RX;
+var r: 0..7;
+begin
+	debug('--executing INC RX');
+	r := IR and %111;
+	inc(RX[r]);
+	FZ:=ord(RX[r]=0);
+	FS:=ord(RX[r]>=$8000)
+	// FC unchanged
+end;
+
+procedure i_DEC_RX;
+var r: 0..7;
+begin
+	debug('--executing DEC RX');
+	r := IR and %111;
+	dec(RX[r]);
+	FZ:=ord(RX[r]=0);
+	FS:=ord(RX[r]>=$8000)
+	// FC unchanged
+end;
 // ------------------ special instructions --------------
 
 procedure GRP1;
@@ -579,12 +683,27 @@ procedure GRP1;
 begin
 	debug('-executing GRP1');
 	case sreg of
+	0:i_ADD;
+	1:i_OR;
 	2:i_ADC;
 	4:i_AND;
 	5:i_SUB;
 	7:i_CMP;
 	else
 		error('subInstruction GRP1 number '+intToStr(sreg)+' is not yet implemented')
+	end
+end;
+
+procedure GRP4;
+begin
+	debug('-executing GRP4 Eb');
+	modRM;
+	oper1 := mm_E;
+	case sreg of
+	0:i_INC;
+	1:i_DEC;
+	else
+		error('subInstruction GRP4 number '+intToStr(sreg)+' is not yet implemented')
 	end
 end;
 
@@ -608,26 +727,33 @@ begin //main
 		d := (IR and %10) >> 1;
 		case IR of
 		$00..$03: begin mm_EG; i_ADD end;	
+		$04,$05: begin mm_AI; i_ADD end;
 		$08..$0B: begin mm_EG; i_OR end;
 		$18..$1B: begin mm_EG; i_SBB end;
+		$20..$23: begin mm_EG; i_AND end;
 		$28..$2B: begin mm_EG; i_SUB end;
 		$30..$33: begin mm_EG; i_XOR end;
-		$38..$3B: begin mm_EG; i_CMP end; //error('39 - cmp cx, bx - nyi');
+		$38..$3B: begin mm_EG; i_CMP end;
+		$3C,$3D: begin mm_AI; i_CMP end; //error('$3C - CMP AL Ib - nyi');
 		$40..$47: i_INC_RX;
 		$48..$4F: i_DEC_RX;
 		$50..$57: i_PUSH_RX; 
 		$58..$5F: i_POP_RX;
-		$72,$74,$75,$76,$79: i_Jcond; // $70..7F has same format with other flags
-		$80..$83: begin mm_EI; GRP1 end;		
+		$72,$74,$75,$76,$77,$79: i_Jcond; // $70..7F has same format with other flags
+		$80..$83: begin mm_EI; GRP1 end;
+		$86..$87: begin mm_EG; i_XCHG end;	
 		$88..$8B: begin mm_EG; i_MOV end; 
 		$90: debug('--NOP');
+		$91..$97: i_XCHG_RX_AX; 
 		$B0..$B7: i_MOV_R8_Ib;
 		$B8..$BF: i_MOV_RX_Iw;
 		$C3: i_RET;
+		$C6,$C7: begin d := 0; mm_EI; i_MOV end; //d is not used as s here... set to 0
 		$E8: i_CALL_Jv; 
 		$EB: i_JMP_Jb;
 		$F4: i_HLT;
-		$F9: begin debug('--executing STC');FC := 1 end
+		$F9: begin debug('--executing STC');FC := 1 end;
+		$FE: GRP4;
 		else
 			error('instruction is not yet implemented')
 		end
