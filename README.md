@@ -1,2 +1,7 @@
 # ED8086
-A 8086-8088 emulator (nothing working yet)
+
+emulator for 8086/8088 subset as requested in                       
+https://codegolf.stackexchange.com/questions/4732/emulate-an-intel-8086-cpu
+
+
+kleenup needed
